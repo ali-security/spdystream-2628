@@ -59,6 +59,11 @@ func (frame *SettingsFrame) read(h ControlFrameHeader, f *Framer) error {
 	if err := binary.Read(f.r, binary.BigEndian, &numSettings); err != nil {
 		return err
 	}
+	// Each setting is 8 bytes (4-byte id + 4-byte value).
+	// Payload is 4 bytes for numSettings + numSettings*8.
+	if h.length < 4 || numSettings > (h.length-4)/8 {
+		return &Error{InvalidControlFrame, 0}
+	}
 	frame.FlagIdValues = make([]SettingsFlagIdValue, numSettings)
 	for i := uint32(0); i < numSettings; i++ {
 		if err := binary.Read(f.r, binary.BigEndian, &frame.FlagIdValues[i].Id); err != nil {
@@ -177,8 +182,19 @@ func (f *Framer) parseControlFrame(version uint16, frameType ControlFrameType) (
 	if err := binary.Read(f.r, binary.BigEndian, &length); err != nil {
 		return nil, err
 	}
+	maxControlFramePayload := uint32(MaxDataLength)
+	if f.maxFrameLength > 0 {
+		maxControlFramePayload = f.maxFrameLength
+	}
+
 	flags := ControlFlags((length & 0xff000000) >> 24)
 	length &= 0xffffff
+	if length > maxControlFramePayload {
+		if _, err := io.CopyN(io.Discard, f.r, int64(length)); err != nil {
+			return nil, err
+		}
+		return nil, &Error{InvalidControlFrame, 0}
+	}
 	header := ControlFrameHeader{version, frameType, flags, length}
 	cframe, err := newControlFrame(frameType)
 	if err != nil {
@@ -190,7 +206,7 @@ func (f *Framer) parseControlFrame(version uint16, frameType ControlFrameType) (
 	return cframe, nil
 }
 
-func parseHeaderValueBlock(r io.Reader, streamId StreamId) (http.Header, error) {
+func (f *Framer) parseHeaderValueBlock(r io.Reader, streamId StreamId) (http.Header, error) {
 	var numHeaders uint32
 	if err := binary.Read(r, binary.BigEndian, &numHeaders); err != nil {
 		return nil, err
@@ -256,7 +272,7 @@ func (f *Framer) readSynStreamFrame(h ControlFrameHeader, frame *SynStreamFrame)
 		}
 		reader = f.headerDecompressor
 	}
-	frame.Headers, err = parseHeaderValueBlock(reader, frame.StreamId)
+	frame.Headers, err = f.parseHeaderValueBlock(reader, frame.StreamId)
 	if !f.headerCompressionDisabled && (err == io.EOF && f.headerReader.N == 0 || f.headerReader.N != 0) {
 		err = &Error{WrongCompressedPayloadSize, 0}
 	}
@@ -288,7 +304,7 @@ func (f *Framer) readSynReplyFrame(h ControlFrameHeader, frame *SynReplyFrame) e
 		}
 		reader = f.headerDecompressor
 	}
-	frame.Headers, err = parseHeaderValueBlock(reader, frame.StreamId)
+	frame.Headers, err = f.parseHeaderValueBlock(reader, frame.StreamId)
 	if !f.headerCompressionDisabled && (err == io.EOF && f.headerReader.N == 0 || f.headerReader.N != 0) {
 		err = &Error{WrongCompressedPayloadSize, 0}
 	}
@@ -320,7 +336,7 @@ func (f *Framer) readHeadersFrame(h ControlFrameHeader, frame *HeadersFrame) err
 		}
 		reader = f.headerDecompressor
 	}
-	frame.Headers, err = parseHeaderValueBlock(reader, frame.StreamId)
+	frame.Headers, err = f.parseHeaderValueBlock(reader, frame.StreamId)
 	if !f.headerCompressionDisabled && (err == io.EOF && f.headerReader.N == 0 || f.headerReader.N != 0) {
 		err = &Error{WrongCompressedPayloadSize, 0}
 	}
